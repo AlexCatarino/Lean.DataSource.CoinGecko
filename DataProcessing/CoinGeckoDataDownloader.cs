@@ -40,8 +40,11 @@ namespace QuantConnect.DataProcessing
         public const string VendorName = "coingecko";
         
         private readonly string _destinationFolder;
+        private readonly string _processedFolder;
         private readonly string _universeFolder;
+        private readonly string _processedUniverseFolder;
         private readonly int _maxRetries = 5;
+        private readonly HttpClient _client;
 
         /// <summary>
         /// Control the rate of download per unit of time.
@@ -53,17 +56,28 @@ namespace QuantConnect.DataProcessing
         /// </summary>
         /// <param name="destinationFolder">The folder where the data will be saved</param>
         /// <param name="apiKey">The Vendor API key</param>
-        public CoinGeckoUniverseDataDownloader(string destinationFolder, string apiKey = null)
+        public CoinGeckoUniverseDataDownloader(string destinationFolder, string processedFolder, string apiKey = null)
         {
             _destinationFolder = destinationFolder;
+            _processedFolder = processedFolder;
             _universeFolder = Path.Combine(_destinationFolder, "universe");
+            _processedUniverseFolder = Path.Combine(_processedFolder, "universe");
 
             // CoinGecko: Our Free API* has a rate limit of 10-50 calls/minute
-            // Represents rate limits of 10 requests per 1 minute
-            _indexGate = new RateGate(10, TimeSpan.FromMinutes(1));
+            // Represents rate limits of 5 requests per 1 minute
+            _indexGate = new RateGate(5, TimeSpan.FromMinutes(1));
 
             Directory.CreateDirectory(_destinationFolder);
+            Directory.CreateDirectory(_processedFolder);
             Directory.CreateDirectory(_universeFolder);
+            Directory.CreateDirectory(_processedUniverseFolder);
+            
+            _client = new HttpClient();
+            _client.BaseAddress = new Uri("https://api.coingecko.com/api/v3/coins/");
+            _client.DefaultRequestHeaders.Clear();
+
+            // Responses are in JSON: you need to specify the HTTP header Accept: application/json
+            _client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         }
 
         /// <summary>
@@ -75,20 +89,18 @@ namespace QuantConnect.DataProcessing
             var stopwatch = Stopwatch.StartNew();
 
             var coinGeckoList = GetCoinGeckoList();
-            var supported = GetSupportedCryptoCurrencies();
             var universeData = new Dictionary<DateTime, List<string>>();
 
             foreach (var coinGeckoItem in coinGeckoList)
             {
-                if (!supported.Remove(coinGeckoItem.Symbol)) continue;
-
-                var coinGeckoMarketChartsForId = GetCoinGeckoMarketChartsForId(coinGeckoItem.Id);
+                var exists = File.Exists(Path.Combine(_processedFolder, $"{coinGeckoItem.Symbol.ToLowerInvariant()}.csv"));
+                var coinGeckoMarketChartsForId = GetCoinGeckoMarketChartsForId(coinGeckoItem.Id, exists);
                 var coinGeckoDictionary = coinGeckoMarketChartsForId.GetCoinGeckoDictionary();
 
                 string coinGeckoToString(CoinGecko coinGecko)
                     => $"{coinGecko.EndTime:yyyyMMdd},{coinGecko.Price},{coinGecko.Volume},{coinGecko.MarketCap}";
 
-                SaveContentToFile(_destinationFolder, coinGeckoItem.Symbol,
+                SaveContentToFile(_destinationFolder, _processedFolder, coinGeckoItem.Symbol,
                     coinGeckoDictionary.Select(x => coinGeckoToString(x.Value)));
 
                 foreach (var (key, coinGecko) in coinGeckoDictionary)
@@ -106,42 +118,11 @@ namespace QuantConnect.DataProcessing
 
             foreach (var (date, content) in universeData)
             {
-                SaveContentToFile(_universeFolder, $"{date:yyyyMMdd}", content);
+                SaveContentToFile(_universeFolder, _processedUniverseFolder, $"{date:yyyyMMdd}", content);
             }
 
             Log.Trace($"CoinGeckoUniverseDataDownloader.Run(): Finished in {stopwatch.Elapsed.ToStringInvariant(null)}");
             return true;
-        }
-
-        /// <summary>
-        /// Gets the list of crypto currencies supported by QuantConnect
-        /// </summary>
-        /// <returns>List of crypto currencies supported by QuantConnect</returns>
-        private static HashSet<string> GetSupportedCryptoCurrencies()
-        {
-            var coins = new HashSet<string>();
-
-            var symbolPropertiesDatabase = SymbolPropertiesDatabase.FromDataFolder();
-
-            var fiat = symbolPropertiesDatabase.GetSymbolPropertiesList(Market.Oanda, SecurityType.Forex)
-                .Select(x => x.Value.QuoteCurrency.ToLowerInvariant()).ToHashSet();
-
-            foreach (var symbolPropertiesFromMarket in Market.SupportedMarkets()
-                         .Select(market => symbolPropertiesDatabase.GetSymbolPropertiesList(market, SecurityType.Crypto)))
-            {
-                foreach (var (key, symbolProperties) in symbolPropertiesFromMarket)
-                {
-                    var coin = key.Symbol.ToLowerInvariant();
-                    var quote = symbolProperties.QuoteCurrency.ToLowerInvariant();
-                    var end = coin.Length - quote.Length;
-                    coin = coin[..end];
-
-                    if (!fiat.Contains(coin)) coins.Add(coin);
-                    if (!fiat.Contains(quote)) coins.Add(quote);
-                }
-            }
-
-            return coins;
         }
 
         /// <summary>
@@ -179,8 +160,9 @@ namespace QuantConnect.DataProcessing
         /// this data downloader and the rate limit of CoinGecko API is high 
         /// </summary>
         /// <param name="id">Coin Id</param>
+        /// <param name="exists">is the processed file exists</param>
         /// <returns>Data from the MarketCharts endpoint for a given Id</returns>
-        private CoinGeckoMarketChart GetCoinGeckoMarketChartsForId(string id)
+        private CoinGeckoMarketChart GetCoinGeckoMarketChartsForId(string id, bool exists)
         {
             string value;
             if (File.Exists($"{id}.json"))
@@ -189,7 +171,8 @@ namespace QuantConnect.DataProcessing
             }
             else
             {
-                var url = $"{id}/market_chart?vs_currency=usd&days=max&interval=daily";
+                var days = exists ? "1" : "max";
+                var url = $"{id}/market_chart?vs_currency=usd&days={days}&interval=daily";
                 value = HttpRequester(url).Result;
                 File.WriteAllText($"{id}.json", value);
             }
@@ -209,17 +192,10 @@ namespace QuantConnect.DataProcessing
             {
                 try
                 {
-                    using var client = new HttpClient();
-                    client.BaseAddress = new Uri("https://api.coingecko.com/api/v3/coins/");
-                    client.DefaultRequestHeaders.Clear();
-
-                    // Responses are in JSON: you need to specify the HTTP header Accept: application/json
-                    client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-                        
                     // Makes sure we don't overrun Quiver rate limits accidentally
                     _indexGate.WaitToProceed();
 
-                    var response = await client.GetAsync(Uri.EscapeUriString(url));
+                    var response = await _client.GetAsync(Uri.EscapeUriString(url));
                     if (response.StatusCode == HttpStatusCode.NotFound)
                     {
                         Log.Error($"CoinGeckoUniverseDataDownloader.HttpRequester(): Files not found at url: {Uri.EscapeUriString(url)}");
@@ -230,7 +206,7 @@ namespace QuantConnect.DataProcessing
                     if (response.StatusCode == HttpStatusCode.Unauthorized)
                     {
                         var finalRequestUri = response.RequestMessage?.RequestUri; // contains the final location after following the redirect.
-                        response = client.GetAsync(finalRequestUri).Result; // Reissue the request. The DefaultRequestHeaders configured on the client will be used, so we don't have to set them again.
+                        response = _client.GetAsync(finalRequestUri).Result; // Reissue the request. The DefaultRequestHeaders configured on the client will be used, so we don't have to set them again.
                     }
 
                     response.EnsureSuccessStatusCode();
@@ -254,28 +230,43 @@ namespace QuantConnect.DataProcessing
         /// Saves contents to disk, deleting existing zip files
         /// </summary>
         /// <param name="destinationFolder">Final destination of the data</param>
+        /// <param name="processedFolder">Processed data folder</param>
         /// <param name="name">file name</param>
         /// <param name="contents">Contents to write</param>
-        private static void SaveContentToFile(string destinationFolder, string name, IEnumerable<string> contents)
+        private static void SaveContentToFile(string destinationFolder, string processedFolder, string name, IEnumerable<string> contents)
         {
-            var lines = new HashSet<string>(contents);
+            name = $"{name.ToLowerInvariant()}.csv";
+            var isUniverse = destinationFolder.Contains("universe");
 
-            var finalLines = destinationFolder.Contains("universe")
+            var filePath = isUniverse
+                ? Path.Combine(processedFolder, "universe", name)
+                : Path.Combine(processedFolder, name);
+
+            var lines = new HashSet<string>(contents);
+            if (File.Exists(filePath))
+            {
+                foreach (var line in File.ReadAllLines(filePath))
+                {
+                    lines.Add(line);
+                }
+            }
+
+            var finalLines = isUniverse
                 ? lines.OrderBy(x => x.Split(',').First()).ToList()
                 : lines.OrderBy(x => DateTime.ParseExact(x.Split(',').First(), "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal)).ToList();
 
-            var tempPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.tmp");
-            File.WriteAllLines(tempPath, finalLines);
-            var tempFilePath = new FileInfo(tempPath);
-
             var finalPath = Path.Combine(destinationFolder, $"{name.ToLowerInvariant()}.csv");
-            tempFilePath.MoveTo(finalPath, true);
+            File.WriteAllLines(finalPath, finalLines);
         }
         
         /// <summary>
         /// Disposes of unmanaged resources
         /// </summary>
-        public void Dispose() => _indexGate?.Dispose();
+        public void Dispose()
+        {
+            _indexGate?.Dispose();
+            _client?.Dispose();
+        }
 
         /// <summary>
         /// Represents items of the list of coins supported by CoinGecko
