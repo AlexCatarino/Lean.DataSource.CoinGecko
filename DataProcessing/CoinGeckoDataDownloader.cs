@@ -89,10 +89,13 @@ namespace QuantConnect.DataProcessing
             var stopwatch = Stopwatch.StartNew();
 
             var coinGeckoList = GetCoinGeckoList();
+            var supported = GetSupportedCryptoCurrencies();
             var universeData = new Dictionary<DateTime, List<string>>();
 
             foreach (var coinGeckoItem in coinGeckoList)
             {
+                if (!supported.Remove(coinGeckoItem.Symbol)) continue;
+
                 var exists = File.Exists(Path.Combine(_processedFolder, $"{coinGeckoItem.Symbol.ToLowerInvariant()}.csv"));
                 var coinGeckoMarketChartsForId = GetCoinGeckoMarketChartsForId(coinGeckoItem.Id, exists);
                 var coinGeckoDictionary = coinGeckoMarketChartsForId.GetCoinGeckoDictionary();
@@ -123,6 +126,37 @@ namespace QuantConnect.DataProcessing
 
             Log.Trace($"CoinGeckoUniverseDataDownloader.Run(): Finished in {stopwatch.Elapsed.ToStringInvariant(null)}");
             return true;
+        }
+
+        /// <summary>
+        /// Gets the list of crypto currencies supported by QuantConnect
+        /// </summary>
+        /// <returns>List of crypto currencies supported by QuantConnect</returns>
+        private static HashSet<string> GetSupportedCryptoCurrencies()
+        {
+            var coins = new HashSet<string>();
+
+            var symbolPropertiesDatabase = SymbolPropertiesDatabase.FromDataFolder();
+
+            var fiat = symbolPropertiesDatabase.GetSymbolPropertiesList(Market.Oanda, SecurityType.Forex)
+                .Select(x => x.Value.QuoteCurrency.ToLowerInvariant()).ToHashSet();
+
+            foreach (var symbolPropertiesFromMarket in Market.SupportedMarkets()
+                         .Select(market => symbolPropertiesDatabase.GetSymbolPropertiesList(market, SecurityType.Crypto)))
+            {
+                foreach (var (key, symbolProperties) in symbolPropertiesFromMarket)
+                {
+                    var coin = key.Symbol.ToLowerInvariant();
+                    var quote = symbolProperties.QuoteCurrency.ToLowerInvariant();
+                    var end = coin.Length - quote.Length;
+                    coin = coin[..end];
+
+                    if (!fiat.Contains(coin)) coins.Add(coin);
+                    if (!fiat.Contains(quote)) coins.Add(quote);
+                }
+            }
+
+            return coins;
         }
 
         /// <summary>
@@ -255,7 +289,7 @@ namespace QuantConnect.DataProcessing
                 ? lines.OrderBy(x => x.Split(',').First()).ToList()
                 : lines.OrderBy(x => DateTime.ParseExact(x.Split(',').First(), "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal)).ToList();
 
-            var finalPath = Path.Combine(destinationFolder, $"{name.ToLowerInvariant()}.csv");
+            var finalPath = Path.Combine(destinationFolder, name);
             File.WriteAllLines(finalPath, finalLines);
         }
         
