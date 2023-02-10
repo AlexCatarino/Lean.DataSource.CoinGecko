@@ -116,11 +116,11 @@ namespace QuantConnect.DataSource
         /// <summary>
         /// Creates a Symbol object for a given market and quote currency
         /// </summary>
-        /// <param name="securityType">The security type of the ticker resides in</param>
         /// <param name="market">The market the ticker resides in</param>
         /// <param name="quoteCurrency">The quote currency of the crypto-currency pair. E.g. USD for BTCUSD</param>
+        /// <param name="securityType">The security type of the ticker resides in</param>
         /// <returns>A new Symbol object for the specified ticker</returns>
-        public Symbol CreateSymbol(SecurityType securityType, string market, string quoteCurrency = "USD")
+        public Symbol CreateSymbol(string market, string quoteCurrency = "USD", SecurityType securityType = SecurityType.Crypto)
         {
             return Symbol.Create($"{Coin}{quoteCurrency}", securityType, market);
         }
