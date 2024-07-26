@@ -73,12 +73,15 @@ namespace QuantConnect.DataProcessing
             var rate = Config.GetInt("coin-gecko-rate-limit", 5);
             _indexGate = new RateGate(rate, TimeSpan.FromMinutes(1));
 
+            var apiKey = Config.Get("coin-gecko-api-key", "kvberikbekbh");
+
             Directory.CreateDirectory(_destinationFolder);
             Directory.CreateDirectory(_processedFolder);
             Directory.CreateDirectory(_universeFolder);
             Directory.CreateDirectory(_processedUniverseFolder);
             
             _client = new HttpClient();
+
             _client.BaseAddress = new Uri("https://api.coingecko.com/api/v3/coins/");
             _client.DefaultRequestHeaders.Clear();
 
