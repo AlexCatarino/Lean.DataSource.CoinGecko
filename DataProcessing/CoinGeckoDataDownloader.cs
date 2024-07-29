@@ -94,40 +94,61 @@ namespace QuantConnect.DataProcessing
         {
             var stopwatch = Stopwatch.StartNew();
 
-            var coinGeckoList = GetCoinGeckoList();
             var supported = GetSupportedCryptoCurrencies();
-            var universeData = new Dictionary<DateTime, List<string>>();
+            var coinGeckoList = GetCoinGeckoList(supported);
+            var universeData = new Dictionary<DateTime, List<CoinGecko>>();
 
             foreach (var coinGeckoItem in coinGeckoList)
             {
-                if (!supported.Remove(coinGeckoItem.Symbol)) continue;
-
                 var exists = File.Exists(Path.Combine(_processedFolder, $"{coinGeckoItem.Symbol.ToLowerInvariant()}.csv"));
                 var coinGeckoMarketChartsForId = GetCoinGeckoMarketChartsForId(coinGeckoItem.Id, exists);
                 var coinGeckoDictionary = coinGeckoMarketChartsForId.GetCoinGeckoDictionary();
-
-                string coinGeckoToString(CoinGecko coinGecko)
-                    => $"{coinGecko.EndTime:yyyyMMdd},{coinGecko.Price},{coinGecko.Volume},{coinGecko.MarketCap}";
-
-                SaveContentToFile(_destinationFolder, _processedFolder, coinGeckoItem.Symbol,
-                    coinGeckoDictionary.Select(x => coinGeckoToString(x.Value)));
 
                 foreach (var (key, coinGecko) in coinGeckoDictionary)
                 {
                     if (!universeData.ContainsKey(key))
                     {
-                        universeData[key] = new List<string>();
+                        universeData[key] = new();
                     }
 
-                    universeData[key].Add($"{coinGeckoItem.Symbol.ToUpperInvariant()},{coinGecko.Price},{coinGecko.Volume},{coinGecko.MarketCap}");
+                    universeData[key].Add(coinGecko);
                 }
 
                 Log.Trace($"CoinGeckoUniverseDataDownloader.Run(): Processed: {coinGeckoItem}");
             }
 
-            foreach (var (date, content) in universeData)
+            var dictionary = new Dictionary<string, List<CoinGecko>>();
+
+            foreach (var (date, coins) in universeData)
             {
-                SaveContentToFile(_universeFolder, _processedUniverseFolder, $"{date:yyyyMMdd}", content);
+                var contents = coins.GroupBy(x => x.Coin).Select(x =>
+                {
+                    return x.OrderBy(x => x.MarketCap).Last();
+                    
+                });
+
+                foreach (var coinGecko in contents)
+                {
+                    if (!dictionary.ContainsKey(coinGecko.Coin))
+                    {
+                        dictionary[coinGecko.Coin] = new();
+                    }
+
+                    dictionary[coinGecko.Coin].Add(coinGecko);
+                }
+
+
+                SaveContentToFile(_universeFolder, _processedUniverseFolder, $"{date:yyyyMMdd}",
+                    contents.Select(x => $"{x.Coin.ToUpperInvariant()},{x.Price},{x.Volume},{x.MarketCap}");
+            }
+
+            string coinGeckoToString(CoinGecko coinGecko)
+                => $"{coinGecko.EndTime:yyyyMMdd},{coinGecko.Price},{coinGecko.Volume},{coinGecko.MarketCap}";
+
+            foreach (var (coin, coins) in dictionary)
+            {
+                SaveContentToFile(_destinationFolder, _processedFolder, coin,
+                coins.Select(coinGeckoToString));
             }
 
             Log.Trace($"CoinGeckoUniverseDataDownloader.Run(): Finished in {stopwatch.Elapsed.ToStringInvariant(null)}");
@@ -171,7 +192,7 @@ namespace QuantConnect.DataProcessing
         /// this data downloader and the rate limit of CoinGecko API is high 
         /// </summary>
         /// <returns>List of coins supported by CoinGecko</returns>
-        private List<CoinGeckoItem> GetCoinGeckoList()
+        private List<CoinGeckoItem> GetCoinGeckoList(HashSet<string> supported)
         {
             string value;
 
@@ -189,6 +210,7 @@ namespace QuantConnect.DataProcessing
             var coinGeckoList = JsonConvert.DeserializeObject<List<CoinGeckoItem>>(value)
                 .GroupBy(x => x.Symbol)
                 .SelectMany(x => x.Where(y => !y.Name.ToLowerInvariant().Contains("wormhole")))
+                .Where(x => supported.Contains(x.Symbol))
                 .ToList();
 
             return coinGeckoList;
